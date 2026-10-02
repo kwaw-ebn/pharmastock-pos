@@ -1,3 +1,4 @@
+import GatewayPayments from "./GatewayPayments";
 import {
   useEffect,
   useState,
@@ -391,10 +392,21 @@ function Login({
 }) {
   const [mode, setMode] = useState("login");
   const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    api("/auth/setup-status")
+      .then((r) => {
+        if (r.needs_setup) setMode("setup");
+      })
+      .catch(() => {});
+  }, []);
   async function submit(values: Row) {
     setBusy(true);
     try {
-      if (mode === "login") {
+      if (mode === "setup") {
+        const result = await api("/auth/setup", "POST", values);
+        notify(result.message);
+        setMode("login");
+      } else if (mode === "login") {
         const result = await api("/auth/login", "POST", values);
         setToken(result.access_token);
         onLogin(result.user);
@@ -457,16 +469,20 @@ function Login({
           <Pill size={28} />
         </div>
         <h2>
-          {mode === "login"
-            ? "Welcome back"
-            : mode === "request"
-              ? "Forgot your password?"
-              : "Set a new password"}
+          {mode === "setup"
+            ? "Set up your pharmacy"
+            : mode === "login"
+              ? "Welcome back"
+              : mode === "request"
+                ? "Forgot your password?"
+                : "Set a new password"}
         </h2>
         <p>
-          {mode === "login"
-            ? "Sign in to your pharmacy workspace."
-            : "Your administrator can help if email is not configured."}
+          {mode === "setup"
+            ? "Create the first administrator using the setup token from your Render environment."
+            : mode === "login"
+              ? "Sign in to your pharmacy workspace."
+              : "Your administrator can help if email is not configured."}
         </p>
         <Form
           key={mode}
@@ -474,42 +490,68 @@ function Login({
           submit={submit}
           label={mode === "login" ? "Sign in to workspace" : "Continue"}
           fields={
-            mode === "login"
+            mode === "setup"
               ? [
                   {
+                    key: "token",
+                    label: "Setup token",
+                    type: "password",
+                    required: true,
+                  },
+                  {
                     key: "username",
-                    label: "Username or email",
+                    label: "Administrator username",
+                    required: true,
+                  },
+                  {
+                    key: "email",
+                    label: "Administrator email",
+                    type: "email",
                     required: true,
                   },
                   {
                     key: "password",
-                    label: "Password",
+                    label: "Password (12+ characters)",
                     type: "password",
                     required: true,
                   },
                 ]
-              : mode === "request"
+              : mode === "login"
                 ? [
                     {
-                      key: "email",
-                      label: "Account email",
-                      type: "email",
-                      required: true,
-                    },
-                  ]
-                : [
-                    {
-                      key: "token",
-                      label: "Reset token from email",
+                      key: "username",
+                      label: "Username or email",
                       required: true,
                     },
                     {
                       key: "password",
-                      label: "New password (12+ characters)",
+                      label: "Password",
                       type: "password",
                       required: true,
                     },
                   ]
+                : mode === "request"
+                  ? [
+                      {
+                        key: "email",
+                        label: "Account email",
+                        type: "email",
+                        required: true,
+                      },
+                    ]
+                  : [
+                      {
+                        key: "token",
+                        label: "Reset token from email",
+                        required: true,
+                      },
+                      {
+                        key: "password",
+                        label: "New password (12+ characters)",
+                        type: "password",
+                        required: true,
+                      },
+                    ]
           }
         />
         <div className="login-links">
@@ -1035,6 +1077,13 @@ function POS({
     [busy, setBusy] = useState(false),
     [customers, setCustomers] = useState<Row[]>([]),
     [customer, setCustomer] = useState("");
+  const [gateway, setGateway] = useState(false),
+    [paymentRefresh, setPaymentRefresh] = useState(0);
+  useEffect(() => {
+    api("/payments/config")
+      .then((c) => setGateway(c.enabled))
+      .catch((e) => notify(e.message, true));
+  }, [notify]);
   const requestKey = useRef(crypto.randomUUID());
   useEffect(() => {
     let live = true;
@@ -1090,6 +1139,31 @@ function POS({
     if (!cart.length) return;
     setBusy(true);
     try {
+      if (gateway && (method === "Card" || method === "Mobile Money")) {
+        const email = prompt("Customer email for secure payment checkout:");
+        if (!email) return;
+        await api("/payments/initialize", "POST", {
+          items: cart.map((p) => ({ product_id: p.id, quantity: p.qty })),
+          discount,
+          payment_method: method,
+          amount_paid: total,
+          customer_id: customer ? Number(customer) : null,
+          prescription_verified: verified,
+          idempotency_key: requestKey.current,
+          email,
+        });
+        setCart([]);
+        setPaid("");
+        setDiscount(0);
+        setVerified(false);
+        setCustomer("");
+        requestKey.current = crypto.randomUUID();
+        setPaymentRefresh((v) => v + 1);
+        notify(
+          "Stock reserved. Open secure checkout below, then verify payment.",
+        );
+        return;
+      }
       const sale = await api("/sales", "POST", {
         items: cart.map((p) => ({ product_id: p.id, quantity: p.qty })),
         discount,
@@ -1110,237 +1184,246 @@ function POS({
       setProducts(result.items);
       notify("Sale completed. Receipt is ready.");
     } catch (e) {
+      setPaymentRefresh((n) => n + 1);
       notify((e as Error).message, true);
     } finally {
       setBusy(false);
     }
   }
   return (
-    <div className="pos-grid">
-      <section className="panel product-picker">
-        <div className="panel-heading">
-          <h2>Find a product</h2>
-          <span className="tag muted">Barcode ready</span>
-        </div>
-        <div className="search-field">
-          <Search size={18} />
-          <input
-            aria-label="Search products or scan barcode"
-            placeholder="Name, generic name or barcode…"
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                const p =
-                  products.find((p) => p.barcode === q || p.code === q) ||
-                  (products.length === 1 ? products[0] : null);
-                if (p) {
-                  add(p);
-                  setQ("");
-                }
-              }
-            }}
-            autoFocus
-          />
-        </div>
-        <div className="product-list">
-          {products.map((p) => (
-            <button
-              className="product-card"
-              key={p.id}
-              onClick={() => add(p)}
-              disabled={!p.quantity || busy}
-            >
-              <div className="product-symbol">
-                <Pill size={20} />
-              </div>
-              <div>
-                <strong>{p.name}</strong>
-                <small>
-                  {p.strength} · {p.form}
-                </small>
-                <span
-                  className={
-                    "tag " + (p.quantity <= p.reorder_level ? "amber" : "teal")
+    <>
+      <GatewayPayments
+        notify={notify}
+        complete={complete}
+        refresh={paymentRefresh}
+      />
+      <div className="pos-grid">
+        <section className="panel product-picker">
+          <div className="panel-heading">
+            <h2>Find a product</h2>
+            <span className="tag muted">Barcode ready</span>
+          </div>
+          <div className="search-field">
+            <Search size={18} />
+            <input
+              aria-label="Search products or scan barcode"
+              placeholder="Name, generic name or barcode…"
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  const p =
+                    products.find((p) => p.barcode === q || p.code === q) ||
+                    (products.length === 1 ? products[0] : null);
+                  if (p) {
+                    add(p);
+                    setQ("");
                   }
-                >
-                  {p.quantity} in stock
-                </span>
-                {p.prescription_required && (
-                  <span className="tag purple">Rx</span>
-                )}
-              </div>
-              <b>{fmt(p.selling_price, config.currency)}</b>
-              <Plus size={17} />
-            </button>
-          ))}
-          {!products.length && (
-            <div className="empty">No products match your search.</div>
-          )}
-        </div>
-      </section>
-      <section className="panel cart-panel">
-        <div className="panel-heading">
-          <h2>Current sale</h2>
-          <span className="tag muted">
-            {cart.reduce((s, p) => s + p.qty, 0)} items
-          </span>
-        </div>
-        {cart.length ? (
-          <div className="cart-items">
-            {cart.map((p) => (
-              <div className="cart-item" key={p.id}>
+                }
+              }}
+              autoFocus
+            />
+          </div>
+          <div className="product-list">
+            {products.map((p) => (
+              <button
+                className="product-card"
+                key={p.id}
+                onClick={() => add(p)}
+                disabled={!p.quantity || busy}
+              >
+                <div className="product-symbol">
+                  <Pill size={20} />
+                </div>
                 <div>
                   <strong>{p.name}</strong>
                   <small>
-                    {fmt(p.selling_price, config.currency)} /{" "}
-                    {p.pack_size || "unit"}
+                    {p.strength} · {p.form}
                   </small>
+                  <span
+                    className={
+                      "tag " +
+                      (p.quantity <= p.reorder_level ? "amber" : "teal")
+                    }
+                  >
+                    {p.quantity} in stock
+                  </span>
+                  {p.prescription_required && (
+                    <span className="tag purple">Rx</span>
+                  )}
                 </div>
-                <input
-                  aria-label={"Quantity for " + p.name}
-                  type="number"
-                  min="1"
-                  max={p.quantity}
-                  value={p.qty}
-                  disabled={busy}
-                  onChange={(e) => {
-                    const qty = Math.max(
-                      1,
-                      Math.min(p.quantity, Number(e.target.value) || 1),
-                    );
-                    setCart(
-                      cart.map((i) => (i.id === p.id ? { ...i, qty } : i)),
-                    );
-                    requestKey.current = crypto.randomUUID();
-                  }}
-                />
-                <b>{fmt(p.selling_price * p.qty, config.currency)}</b>
-                <button
-                  className="icon danger"
-                  disabled={busy}
-                  aria-label={"Remove " + p.name}
-                  onClick={() => {
-                    setCart(cart.filter((i) => i.id !== p.id));
-                    requestKey.current = crypto.randomUUID();
-                  }}
-                >
-                  <Trash2 size={16} />
-                </button>
-              </div>
+                <b>{fmt(p.selling_price, config.currency)}</b>
+                <Plus size={17} />
+              </button>
             ))}
+            {!products.length && (
+              <div className="empty">No products match your search.</div>
+            )}
           </div>
-        ) : (
-          <div className="empty cart-empty">
-            <ShoppingCart size={40} />
-            <h3>Ready for the next customer</h3>
-            <p>Add a product to start a sale.</p>
+        </section>
+        <section className="panel cart-panel">
+          <div className="panel-heading">
+            <h2>Current sale</h2>
+            <span className="tag muted">
+              {cart.reduce((s, p) => s + p.qty, 0)} items
+            </span>
           </div>
-        )}
-        {cart.some((p) => p.prescription_required) && (
-          <label className="check-line">
+          {cart.length ? (
+            <div className="cart-items">
+              {cart.map((p) => (
+                <div className="cart-item" key={p.id}>
+                  <div>
+                    <strong>{p.name}</strong>
+                    <small>
+                      {fmt(p.selling_price, config.currency)} /{" "}
+                      {p.pack_size || "unit"}
+                    </small>
+                  </div>
+                  <input
+                    aria-label={"Quantity for " + p.name}
+                    type="number"
+                    min="1"
+                    max={p.quantity}
+                    value={p.qty}
+                    disabled={busy}
+                    onChange={(e) => {
+                      const qty = Math.max(
+                        1,
+                        Math.min(p.quantity, Number(e.target.value) || 1),
+                      );
+                      setCart(
+                        cart.map((i) => (i.id === p.id ? { ...i, qty } : i)),
+                      );
+                      requestKey.current = crypto.randomUUID();
+                    }}
+                  />
+                  <b>{fmt(p.selling_price * p.qty, config.currency)}</b>
+                  <button
+                    className="icon danger"
+                    disabled={busy}
+                    aria-label={"Remove " + p.name}
+                    onClick={() => {
+                      setCart(cart.filter((i) => i.id !== p.id));
+                      requestKey.current = crypto.randomUUID();
+                    }}
+                  >
+                    <Trash2 size={16} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="empty cart-empty">
+              <ShoppingCart size={40} />
+              <h3>Ready for the next customer</h3>
+              <p>Add a product to start a sale.</p>
+            </div>
+          )}
+          {cart.some((p) => p.prescription_required) && (
+            <label className="check-line">
+              <input
+                type="checkbox"
+                checked={verified}
+                disabled={busy}
+                onChange={(e) => setVerified(e.target.checked)}
+              />
+              I have professionally verified the prescription.
+            </label>
+          )}
+          {user.role !== "cashier" && (
+            <label className="customer-select">
+              Customer (optional)
+              <select
+                value={customer}
+                disabled={busy}
+                onChange={(e) => setCustomer(e.target.value)}
+              >
+                <option value="">Walk-in customer</option>
+                {customers.map((c) => (
+                  <option value={c.id} key={c.id}>
+                    {c.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+        </section>
+        <section className="panel checkout">
+          <div className="panel-heading">
+            <h2>Payment summary</h2>
+          </div>
+          <div className="summary-row">
+            <span>Subtotal</span>
+            <strong>{fmt(subtotalCents / 100, config.currency)}</strong>
+          </div>
+          <label>
+            Discount ({config.currency})
             <input
-              type="checkbox"
-              checked={verified}
-              disabled={busy}
-              onChange={(e) => setVerified(e.target.checked)}
+              type="number"
+              min="0"
+              max={subtotalCents / 100}
+              step=".01"
+              value={discount}
+              disabled={user.role === "cashier" || busy}
+              onChange={(e) => setDiscount(Number(e.target.value))}
             />
-            I have professionally verified the prescription.
           </label>
-        )}
-        {user.role !== "cashier" && (
-          <label className="customer-select">
-            Customer (optional)
+          <div className="summary-row">
+            <span>Tax ({config.tax_percent}%)</span>
+            <strong>{fmt(taxCents / 100, config.currency)}</strong>
+          </div>
+          <div className="total-row">
+            <span>Total due</span>
+            <strong>{fmt(total, config.currency)}</strong>
+          </div>
+          <label>
+            Payment method
             <select
-              value={customer}
+              value={method}
               disabled={busy}
-              onChange={(e) => setCustomer(e.target.value)}
+              onChange={(e) => {
+                setMethod(e.target.value);
+                setPaid("");
+              }}
             >
-              <option value="">Walk-in customer</option>
-              {customers.map((c) => (
-                <option value={c.id} key={c.id}>
-                  {c.name}
-                </option>
+              {config.payment_methods.map((m: string) => (
+                <option key={m}>{m}</option>
               ))}
             </select>
           </label>
-        )}
-      </section>
-      <section className="panel checkout">
-        <div className="panel-heading">
-          <h2>Payment summary</h2>
-        </div>
-        <div className="summary-row">
-          <span>Subtotal</span>
-          <strong>{fmt(subtotalCents / 100, config.currency)}</strong>
-        </div>
-        <label>
-          Discount ({config.currency})
-          <input
-            type="number"
-            min="0"
-            max={subtotalCents / 100}
-            step=".01"
-            value={discount}
-            disabled={user.role === "cashier" || busy}
-            onChange={(e) => setDiscount(Number(e.target.value))}
-          />
-        </label>
-        <div className="summary-row">
-          <span>Tax ({config.tax_percent}%)</span>
-          <strong>{fmt(taxCents / 100, config.currency)}</strong>
-        </div>
-        <div className="total-row">
-          <span>Total due</span>
-          <strong>{fmt(total, config.currency)}</strong>
-        </div>
-        <label>
-          Payment method
-          <select
-            value={method}
-            disabled={busy}
-            onChange={(e) => {
-              setMethod(e.target.value);
-              setPaid("");
-            }}
+          <label>
+            Amount paid
+            <input
+              type="number"
+              min="0"
+              step=".01"
+              placeholder={total.toFixed(2)}
+              value={paid}
+              disabled={busy}
+              onChange={(e) => setPaid(e.target.value)}
+            />
+          </label>
+          <div className="summary-row">
+            <span>Change</span>
+            <strong>
+              {fmt(Math.max(0, Number(paid || total) - total), config.currency)}
+            </strong>
+          </div>
+          <button
+            className="primary checkout-button"
+            disabled={!cart.length || busy}
+            onClick={checkout}
           >
-            {config.payment_methods.map((m: string) => (
-              <option key={m}>{m}</option>
-            ))}
-          </select>
-        </label>
-        <label>
-          Amount paid
-          <input
-            type="number"
-            min="0"
-            step=".01"
-            placeholder={total.toFixed(2)}
-            value={paid}
-            disabled={busy}
-            onChange={(e) => setPaid(e.target.value)}
-          />
-        </label>
-        <div className="summary-row">
-          <span>Change</span>
-          <strong>
-            {fmt(Math.max(0, Number(paid || total) - total), config.currency)}
-          </strong>
-        </div>
-        <button
-          className="primary checkout-button"
-          disabled={!cart.length || busy}
-          onClick={checkout}
-        >
-          <CheckCircle2 size={19} />
-          {busy ? "Completing sale…" : "Complete sale"}
-        </button>
-        <p className="secure-note">
-          <ShieldCheck size={16} />
-          Stock updates after a successful sale.
-        </p>
-      </section>
-    </div>
+            <CheckCircle2 size={19} />
+            {busy ? "Completing sale…" : "Complete sale"}
+          </button>
+          <p className="secure-note">
+            <ShieldCheck size={16} />
+            Stock updates after a successful sale.
+          </p>
+        </section>
+      </div>
+    </>
   );
 }
 function Records({
@@ -2301,7 +2384,13 @@ function Receipt({
             <br />
             {config.phone}
           </p>
-          <b>{current.status === "refunded" ? "REFUNDED" : "SALE RECEIPT"}</b>
+          <b>
+            {current.status === "refunded"
+              ? "REFUNDED"
+              : current.status === "completed"
+                ? "PAID SALE RECEIPT"
+                : "PAYMENT " + current.status.toUpperCase()}
+          </b>
           <p>
             {current.receipt_number}
             <br />

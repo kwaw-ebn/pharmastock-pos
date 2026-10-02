@@ -6,19 +6,29 @@ Use Docker Compose with PostgreSQL. Put the frontend port behind an HTTPS revers
 
 Create your administrator using the interactive CLI. Add individual staff accounts through Users. Seed data only in a separate demonstration environment. Check medicine identifiers, sale units, batch costs, prescription settings and opening stock before a pilot.
 
-## Render deployment option
+## Render frontend/API and Neon database
 
-The repository includes a Docker backend and a Vite frontend. Deployment has not been provisioned automatically.
+`render.yaml` defines a free Render API in Frankfurt and a separate static frontend. Use a Neon PostgreSQL project in Frankfurt; copy its pooled connection string (TLS enabled) into the API's `DATABASE_URL`. Database migrations run before the API starts.
 
-1. Create a managed PostgreSQL database and a backend web service from this repository with root directory `backend`, Docker runtime and `/api/health` as its health endpoint.
-2. Set `DATABASE_URL` to the managed database URL, `SECRET_KEY` to a generated random secret, and `CORS_ORIGINS` to the exact frontend HTTPS origin. Set `PORT` as required by the host; the Docker command reads it. Keep one API worker for the in-process login limiter.
-3. The backend start command applies Alembic migrations and starts Uvicorn. Review deployment logs. For later migrations that can take time, run `alembic upgrade head` in a controlled pre-deploy job before rollout.
-4. Create a frontend static site, root directory `frontend`, build command `npm ci && npm run build`, publish directory `dist`.
-5. Set the frontend build variable `VITE_API_URL` to the backend HTTPS origin, without `/api` and without a trailing slash. Rebuild after changing it.
-6. Configure a rewrite from `/*` to `/index.html` for client-side fallback. Configure appropriate security headers at the hosting layer, including a Content Security Policy whose `connect-src` permits the backend origin.
-7. Through the backend service shell, run `python -m app.cli create-admin`. Sign in and verify one test stock receipt, sale, receipt and refund before entering real records.
+- API build: `pip install -r backend/requirements.txt`
+- API start: `cd backend && alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 1`
+- Frontend build: `cd frontend && npm ci && npm run build`; publish `frontend/dist`.
+- `VITE_API_URL`: API HTTPS origin, without `/api`. Rebuild the frontend after changing it.
+- API `SECRET_KEY`: random secret with at least 32 characters; `BOOTSTRAP_TOKEN`: a separate random setup token.
+- API `CORS_ORIGINS` and `PAYMENT_CALLBACK_URL`: exact frontend HTTPS origin.
+- API `REQUIRE_GATEWAY_PAYMENTS=true`: rejects staff-confirmed Card/Mobile Money records even before the gateway is configured.
 
-When the frontend is built for a separate origin, use static hosting or change the Nginx `connect-src` to include that API origin. The default Nginx configuration is intended for the same-origin Compose setup.
+Open the frontend and create the first administrator with `BOOTSTRAP_TOKEN` from the Render Environment page. Choose your own password; no default account exists. The setup endpoint becomes unavailable once any user exists. Remove the bootstrap variable afterward if desired. Configure pharmacy information and add staff and opening inventory. Production is initially empty; demonstration data is not installed.
+
+Free API services may sleep when inactive. Consider an always-on plan when operational use requires predictable response times. Keep one API worker until the rate limiter is shared.
+
+## Paystack Card and Mobile Money
+
+Set `PAYSTACK_SECRET_KEY` only in the API's Render environment. Start with the merchant account's test secret. Hosted checkout collects payment details on Paystack; the pharmacy application does not collect card numbers. Set the merchant webhook URL to `https://<api-host>/api/payments/webhook`. Enable the appropriate Ghana payment channels in the merchant account, complete its onboarding, and replace the test key with a live secret before accepting real payments.
+
+Digital checkout reserves stock and creates a pending sale. The pending-payments panel opens hosted checkout and can request verification after the customer returns. Signed webhooks also verify payment. The backend independently checks the reference, amount, currency and test/live environment. Success completes the existing reservation once; verified failure releases stock once. Closing a browser tab does not prove failure, so abandoned/unknown payments remain reserved for reconciliation. Late success after a failed reservation or expired stock is marked `paid_review`; do not dispense without resolving it.
+
+Gateway refunds must be performed and reconciled through the merchant dashboard. The local refund endpoint blocks gateway sales to avoid recording an unexecuted refund. Partial refunds and automated gateway refund reconciliation are not included. Test a successful payment, failed payment, duplicate webhook and return-to-app verification with the merchant's test credentials before enabling live payments.
 
 ## Email
 
@@ -44,4 +54,4 @@ Test restores in an isolated environment. Back up before upgrades. Review retent
 
 All stock writers lock product rows in a deterministic order; checkout locks batches as well. PostgreSQL is required for multi-instance deployment. The login limiter is process-local: add a shared Redis limiter or gateway limiter before scaling beyond one process. Browser inactivity logout does not shorten the JWT's eight-hour maximum server expiry; logging out or disabling an account revokes existing tokens.
 
-Payment recording has no external gateway integration. Refunds record the reversal and must be executed with the actual payment provider separately. CSV can be opened in Excel; native XLSX export is not included. PDF uses the browser print dialog.
+Manual cash refunds record the reversal. Paystack refunds require merchant-dashboard reconciliation. CSV can be opened in Excel; native XLSX export is not included. PDF uses the browser print dialog.

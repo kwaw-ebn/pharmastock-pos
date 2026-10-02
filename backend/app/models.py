@@ -195,3 +195,14 @@ class PasswordReset(Base):
     token_hash = Column(String(64), unique=True, nullable=False)
     expires_at = Column(DateTime(timezone=True), nullable=False)
     used = Column(Boolean, default=False, nullable=False)
+
+
+class PaymentIntent(Base):
+    __tablename__ = "payment_intents"
+    id = Column(Integer, primary_key=True)
+    sale_id = Column(Integer, ForeignKey("sales.id"), unique=True, nullable=False)
+    reference = Column(String(100), unique=True, nullable=False)
+    email = Column(String(255), nullable=False)
+    authorization_url = Column(String(1000), default="")
+    external_id = Column(String(100), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=now, nullable=False)

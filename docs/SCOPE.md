@@ -22,8 +22,8 @@ Account role does not establish a professional qualification. Grant prescription
 ## Explicit limitations
 
 - Single branch, no purchase orders, supplier accounting, insurance claims or external accounting integrations.
-- Full-sale refunds only; no partial item refunds, separate void workflow or pending card transactions.
-- No SMS/WhatsApp notifications, offline transactions or payment provider integrations.
+- Full-sale manual-payment refunds only; gateway refunds require merchant-dashboard reconciliation. No partial item refunds.
+- No SMS/WhatsApp notifications or offline transactions. Paystack supports hosted Card/Mobile Money payments; merchant credentials and onboarding are required.
 - CSV exports and browser PDF printing; no native XLSX or server-generated PDF.
 - Inventory and audit lists have display limits; inventory CSV exports are unpaginated for admin reporting.
 - Currency assumes two decimal places. Product receiving/cost forms are labelled GHS for the intended Ghana pilot.
@@ -31,4 +31,4 @@ Account role does not establish a professional qualification. Grant prescription
 - A configurable warning window is available, plus 30/60/90-day batch filters. The per-product reorder threshold is authoritative.
 - Local workflow tests are separate from a pharmacy security/privacy review and printer compatibility check.
 
-The roadmap can add partial returns, supplier invoicing, shared rate limiting, branch isolation, native document exports, payment gateways and prescription record workflows after the pilot validates the core operations.
+The roadmap can add partial returns, supplier invoicing, shared rate limiting, branch isolation, native document exports and prescription record workflows after the pilot validates the core operations.

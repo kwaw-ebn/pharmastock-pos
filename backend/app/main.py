@@ -167,6 +167,47 @@ def health(db: Session = Depends(get_db)):
     return {"status": "ok"}
 
 
+class SetupIn(UserIn):
+    role: str = "admin"
+    token: str
+
+
+@app.get("/api/auth/setup-status")
+def setup_status(db: Session = Depends(get_db)):
+    return {
+        "needs_setup": bool(os.getenv("BOOTSTRAP_TOKEN"))
+        and not db.scalar(select(User.id).limit(1))
+    }
+
+
+@app.post("/api/auth/setup")
+def setup(data: SetupIn, request: Request, db: Session = Depends(get_db)):
+    rate_limit(request, "setup")
+    expected = os.getenv("BOOTSTRAP_TOKEN", "")
+    if not expected or not secrets.compare_digest(data.token, expected):
+        raise HTTPException(403, "Invalid setup token")
+    if db.bind.dialect.name == "sqlite":
+        db.rollback()
+        db.connection().exec_driver_sql("BEGIN IMMEDIATE")
+    else:
+        db.execute(
+            __import__("sqlalchemy").text("SELECT pg_advisory_xact_lock(78124019)")
+        )
+    if db.scalar(select(User.id).limit(1)):
+        raise HTTPException(409, "Initial setup is already complete")
+    user = User(
+        username=data.username,
+        email=data.email,
+        role="admin",
+        password_hash=password_hash.hash(data.password),
+    )
+    db.add(user)
+    db.flush()
+    audit(db, user, "initial_admin_created", user.id)
+    db.commit()
+    return {"message": "Administrator created. Sign in with your new credentials."}
+
+
 @app.post("/api/auth/login")
 def login(data: LoginIn, request: Request, db: Session = Depends(get_db)):
     rate_limit(request, "login")
@@ -665,6 +706,20 @@ def sale_json(db, sale, detailed=True):
 def create_sale(
     data: SaleIn, user=Depends(current_user), db: Session = Depends(get_db)
 ):
+    if (
+        os.getenv("PAYSTACK_SECRET_KEY")
+        or os.getenv("REQUIRE_GATEWAY_PAYMENTS") == "true"
+    ) and data.payment_method in (
+        "Card",
+        "Mobile Money",
+    ):
+        raise HTTPException(
+            400, "Use the verified gateway checkout for card or Mobile Money"
+        )
+    return prepare_sale(data, user, db)
+
+
+def prepare_sale(data, user, db, pending=False, payment_email=None):
     lock_products(db, [i.product_id for i in data.items])
     existing = db.scalar(
         select(Sale).where(Sale.idempotency_key == data.idempotency_key)
@@ -729,7 +784,7 @@ def create_sale(
         ).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
     )
     total = subtotal - discount + tax
-    paid = cents(data.amount_paid)
+    paid = total if pending else cents(data.amount_paid)
     if paid < total:
         raise HTTPException(400, "Amount paid is below the total")
     if data.payment_method != "Cash" and paid != total:
@@ -747,6 +802,7 @@ def create_sale(
         amount_paid=paid,
         change=paid - total,
         pharmacy_snapshot=config,
+        status="pending" if pending else "completed",
     )
     db.add(sale)
     db.flush()
@@ -768,20 +824,30 @@ def create_sale(
                 batch_id=batch.id,
                 user_id=user.id,
                 quantity=-quantity,
-                kind="sale",
+                kind="reservation" if pending else "sale",
                 reference=sale.receipt_number,
             )
         )
     audit(
         db,
         user,
-        "sale_completed",
+        "payment_reserved" if pending else "sale_completed",
         sale.id,
         {
             "receipt": sale.receipt_number,
             "prescription_verified": data.prescription_verified,
         },
     )
+    if pending:
+        from .models import PaymentIntent
+
+        db.add(
+            PaymentIntent(
+                sale_id=sale.id, reference="PAY-" + uuid4().hex, email=payment_email
+            )
+        )
+        sale.amount_paid = 0
+        sale.change = 0
     db.commit()
     return sale_json(db, sale)
 
@@ -855,6 +921,13 @@ def refund(
     db: Session = Depends(get_db),
 ):
     sale = required(db, Sale, identifier)
+    from .models import PaymentIntent
+
+    if db.scalar(select(PaymentIntent).where(PaymentIntent.sale_id == identifier)):
+        raise HTTPException(
+            409,
+            "Gateway refunds must be completed and reconciled through the Paystack merchant dashboard; no local refund was recorded.",
+        )
     items = db.scalars(select(SaleItem).where(SaleItem.sale_id == identifier)).all()
     lock_products(db, [i.product_id for i in items])
     sale = db.scalar(select(Sale).where(Sale.id == identifier).with_for_update())
@@ -1252,3 +1325,8 @@ def update_user(
     )
     db.commit()
     return obj(record, ("password_hash", "token_version"))
+
+
+from .payments import router as payment_router
+
+app.include_router(payment_router)

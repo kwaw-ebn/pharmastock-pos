@@ -8,7 +8,7 @@ A responsive pharmacy operations application built with React, TypeScript, FastA
 - Product catalogue with barcode search, generic names, prescription flags, configurable prices and reorder thresholds.
 - Stock receiving with multiple lines, supplier invoice references, batch costs and expiry dates.
 - First Expiry, First Out allocation, expired-stock exclusion, atomic checkout and protection against concurrent overselling.
-- Cash, Mobile Money and card payment recording. These record a payment confirmed by staff; they do **not** charge a provider or verify an external payment automatically.
+- Cash recording and Paystack hosted Card/Mobile Money checkout, with stock reservations, signed webhooks and server-side payment verification. Merchant credentials are required to activate the gateway.
 - Unique receipts, 80mm-compatible receipt layout, browser printing, PDF through the browser print dialog and downloadable HTML receipts.
 - Admin-approved full-sale refunds, optional eligible restocking and permanent inventory/audit records.
 - Optional customers with protected purchase history; supplier delivery history; staff administration.
